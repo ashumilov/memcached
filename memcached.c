@@ -2989,7 +2989,7 @@ static void process_touch_command(conn *c, token_t *tokens, const size_t ntokens
     }
 }
 
-static void process_arithmetic_command(conn *c, token_t *tokens, const size_t ntokens, const bool incr) {
+static void process_arithmetic_command(conn *c, token_t *tokens, const size_t ntokens, const int incr) {
     char temp[INCR_MAX_STORAGE_LEN];
     uint64_t delta;
     char *key;
@@ -3024,10 +3024,12 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
         break;
     case DELTA_ITEM_NOT_FOUND:
         pthread_mutex_lock(&c->thread->stats.mutex);
-        if (incr) {
+        if (incr == OP_ADD) {
             c->thread->stats.incr_misses++;
-        } else {
+        } else if (incr == OP_SUB) {
             c->thread->stats.decr_misses++;
+        } else {
+            c->thread->stats.mult_misses++;
         }
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
@@ -3050,7 +3052,7 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
  * returns a response string to send back to the client.
  */
 enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
-                                    const bool incr, const int64_t delta,
+                                    const int incr, const int64_t delta,
                                     char *buf, uint64_t *cas,
                                     const uint32_t hv) {
     char *ptr;
@@ -3075,9 +3077,12 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
         return NON_NUMERIC;
     }
 
-    if (incr) {
+    if (incr == OP_ADD) {
         value += delta;
         MEMCACHED_COMMAND_INCR(c->sfd, ITEM_key(it), it->nkey, value);
+    } else if (incr == OP_MULT) {
+        value *= delta;
+        MEMCACHED_COMMAND_MULT(c->sfd, ITEM_key(it), it->nkey, value);
     } else {
         if(delta > value) {
             value = 0;
@@ -3088,7 +3093,9 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
     }
 
     pthread_mutex_lock(&c->thread->stats.mutex);
-    if (incr) {
+    if (incr == OP_ADD) {
+        c->thread->stats.slab_stats[it->slabs_clsid].incr_hits++;
+    } else if (incr == OP_MULT) {
         c->thread->stats.slab_stats[it->slabs_clsid].incr_hits++;
     } else {
         c->thread->stats.slab_stats[it->slabs_clsid].decr_hits++;
@@ -3263,7 +3270,11 @@ static void process_command(conn *c, char *command) {
 
     } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "incr") == 0)) {
 
-        process_arithmetic_command(c, tokens, ntokens, 1);
+        process_arithmetic_command(c, tokens, ntokens, OP_ADD);
+
+    } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "mult") == 0)) {
+
+        process_arithmetic_command(c, tokens, ntokens, OP_MULT);
 
     } else if (ntokens >= 3 && (strcmp(tokens[COMMAND_TOKEN].value, "gets") == 0)) {
 
@@ -3271,7 +3282,7 @@ static void process_command(conn *c, char *command) {
 
     } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "decr") == 0)) {
 
-        process_arithmetic_command(c, tokens, ntokens, 0);
+        process_arithmetic_command(c, tokens, ntokens, OP_SUB);
 
     } else if (ntokens >= 3 && ntokens <= 5 && (strcmp(tokens[COMMAND_TOKEN].value, "delete") == 0)) {
 
